@@ -244,7 +244,7 @@ EOF
   # Ask user if we should add the annexes to their zshrc
   # If NO_INPUT is set, but NO_ANNEXES is the annexes bit gets appended to the
   # config (ie. default to yes if NO_INPUT, unless NO_ANNEXES)
-  reply=n
+  reply=y
   if [ -n "$NO_INPUT" ]; then
     [ -z "$NO_ANNEXES" ] && reply=y
   else
@@ -255,7 +255,7 @@ EOF
     command cat "$zshrc_annex_file"
     # shellcheck disable=2059
     printf "${COLOR_PALE_MAGENTA}${COLOR_RESET} Enter y/n and press Return: "
-    read -r reply
+    #read -r reply    
   fi
 
   if [ "$reply" = y ] || [ "$reply" = Y ]; then
