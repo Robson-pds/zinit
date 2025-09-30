@@ -356,7 +356,8 @@ builtin source "${ZINIT[BIN_DIR]}/zinit-side.zsh" || {
         if [[ $site = */releases ]] {
             local tag_version=${ICE[ver]}
             if [[ -z $tag_version ]]; then
-                tag_version="$({.zinit-download-file-stdout $site/latest || .zinit-download-file-stdout $site/latest 1;} 2>/dev/null | command grep -i -m 1 -o 'href=./'$user'/'$plugin'/releases/tag/[^"]\+')"
+                local url="https://$site/latest"
+                tag_version="$({.zinit-download-file-stdout $url || .zinit-download-file-stdout $url 1;} 2>/dev/null | command grep -i -m 1 -o 'href=./'$user'/'$plugin'/releases/tag/[^"]\+')"
                 tag_version=${tag_version##*/}
             fi
             local url=$site/expanded_assets/$tag_version
@@ -416,9 +417,15 @@ builtin source "${ZINIT[BIN_DIR]}/zinit-side.zsh" || {
             case ${ICE[proto]} in
                 (|ftp(|s)|git|http(|s)|rsync|ssh)
                     :zinit-git-clone() {
+                        local clone_url
+                        if [[ ${ICE[proto]} == "ssh" ]]; then
+                            clone_url="git@${site:-${ICE[from]:-github.com}}:$remote_url_path"
+                        else
+                            clone_url="${ICE[proto]:-https}://${site:-${ICE[from]:-github.com}}/$remote_url_path"
+                        fi
                         command git clone --progress ${(s: :)ICE[cloneopts]---recursive} \
                             ${(s: :)ICE[depth]:+--depth ${ICE[depth]}} \
-                            "${ICE[proto]:-https}://${site:-${ICE[from]:-github.com}}/$remote_url_path" \
+                            "$clone_url" \
                             "$local_path" \
                             --config transfer.fsckobjects=false \
                             --config receive.fsckobjects=false \
@@ -1436,8 +1443,14 @@ builtin source "${ZINIT[BIN_DIR]}/zinit-side.zsh" || {
   if [[ -z $urlpart ]]; then
     local tag_version=${ICE[ver]}
     if [[ -z $tag_version ]]; then
-      local releases_url=https://github.com/$user/$plugin/releases/latest
-      tag_version="$( { .zinit-download-file-stdout $releases_url || .zinit-download-file-stdout $releases_url 1; } 2>/dev/null | command grep -m1 -o 'href=./'$user'/'$plugin'/releases/tag/[^"]\+' )"
+      # Try GitHub API first, fallback to HTML parsing
+      local api_url=https://api.github.com/repos/$user/$plugin/releases/latest
+      tag_version="$( { .zinit-download-file-stdout $api_url || .zinit-download-file-stdout $api_url 1; } 2>/dev/null | command grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]\+"' | command grep -o '"[^"]*"$' | tr -d '"' )"
+      # Fallback to original method if API fails
+      if [[ -z $tag_version ]]; then
+        local releases_url=https://github.com/$user/$plugin/releases/latest
+        tag_version="$( { .zinit-download-file-stdout $releases_url || .zinit-download-file-stdout $releases_url 1; } 2>/dev/null | command grep -m1 -o 'href=./'$user'/'$plugin'/releases/tag/[^"]\+' )"
+      fi
       tag_version=${tag_version##*/}
     fi
     local url=https://github.com/$user/$plugin/releases/expanded_assets/$tag_version
@@ -2252,78 +2265,68 @@ __zinit-cmake-base-hook () {
 
     .zinit-extract plugin "$extract" "$dir"
 } # ]]]
+# FUNCTION: ∞zinit-cp-mv-operation-hook [[[
+∞zinit-file-cp-mv-operation() {
+    local cmd="$1" # Either "cp" or "mv"
+    local ice_key="$cmd"
+
+    [[ -z $ICE[$ice_key] ]] && return 0
+
+    [[ "$2" = plugin ]] && \
+      local dir="${6#%}" hook="$7" subtype="$8" || \
+      local dir="${5#%}" hook="$6" subtype="$7"
+
+    # Parse and clean up the ICE directive
+    local -a pairs
+    pairs=( ${(s[;])ICE[$ice_key]} ) # Split on semicolons
+    pairs=( "${pairs[@]//((#s)[[:space:]]##|[[:space:]]##(#e))/}" ) # Trim spaces
+
+    local pair retval=0
+    for pair in "${pairs[@]}"; do
+        if [[ $pair == *("->"|"→")* ]]; then
+            local from="${pair%%[[:space:]]#(->|→)*}"
+            local to="${pair##*(->|→)[[:space:]]#}"
+        else
+            local from="${pair%%[[:space:]]##*}"
+            local to="${pair##*[[:space:]]##}"
+        fi
+
+        @zinit-substitute from to
+
+        local -a cmd_args=("-f")
+        local -a afr
+
+        (
+            () { setopt localoptions noautopushd; builtin cd -q "$dir"; } || return 1
+            afr=( ${~from}(DN) ) # Expand glob patterns
+
+            if (( ! ${#afr} )); then
+                +zi-log "{warn}Warning: $ice_key ice didn't match any file. [{error}$pair{warn}]" \
+                               "{nl}{warn}Available files:{nl}{obj}$(ls -1)"
+                retval=1
+                continue
+            fi
+            if (( !OPTS[opt_-q,--quiet] )); then
+                cmd_args+=("-v")
+            fi
+
+            for file in "${afr[@]}"; do
+                command "$cmd" "${cmd_args[@]}" "$file" "$to" || retval=$?
+                # Handle .zwc files if they exist
+                command "$cmd" "${cmd_args[@]}" "$file.zwc" "$to.zwc" 2>/dev/null
+            done
+        )
+    done
+
+    return $retval
+} # ]]]
 # FUNCTION: ∞zinit-mv-hook [[[
 ∞zinit-mv-hook() {
-    [[ -z $ICE[mv] ]] && return 0
-
-    [[ "$1" = plugin ]] && \
-        local dir="${5#%}" hook="$6" subtype="$7" || \
-        local dir="${4#%}" hook="$5" subtype="$6"
-
-    if [[ $ICE[mv] == *("->"|"→")* ]] {
-        local from=${ICE[mv]%%[[:space:]]#(->|→)*} to=${ICE[mv]##*(->|→)[[:space:]]#} || \
-    } else {
-        local from=${ICE[mv]%%[[:space:]]##*} to=${ICE[mv]##*[[:space:]]##}
-    }
-
-    @zinit-substitute from to
-
-    local -a mv_args=("-f")
-    local -a afr
-
-    (
-        () { setopt localoptions noautopushd; builtin cd -q "$dir"; } || return 1
-        afr=( ${~from}(DN) )
-
-        if (( ! ${#afr} )) {
-            +zi-log "{warn}Warning: mv ice didn't match any file. [{error}$ICE[mv]{warn}]" \
-                           "{nl}{warn}Available files:{nl}{obj}$(ls -1)"
-            return 1
-        }
-        if (( !OPTS[opt_-q,--quiet] )) {
-            mv_args+=("-v")
-        }
-
-        command mv "${mv_args[@]}" "${afr[1]}" "$to"
-        local retval=$?
-        command mv "${mv_args[@]}" "${afr[1]}".zwc "$to".zwc 2>/dev/null
-        return $retval
-    )
+    ∞zinit-file-cp-mv-operation "mv" "$@"
 } # ]]]
 # FUNCTION: ∞zinit-cp-hook [[[
 ∞zinit-cp-hook() {
-    [[ -z $ICE[cp] ]] && return
-
-    [[ "$1" = plugin ]] && \
-        local dir="${5#%}" hook="$6" subtype="$7" || \
-        local dir="${4#%}" hook="$5" subtype="$6"
-
-    if [[ $ICE[cp] == *("->"|"→")* ]] {
-        local from=${ICE[cp]%%[[:space:]]#(->|→)*} to=${ICE[cp]##*(->|→)[[:space:]]#} || \
-    } else {
-        local from=${ICE[cp]%%[[:space:]]##*} to=${ICE[cp]##*[[:space:]]##}
-    }
-
-    @zinit-substitute from to
-
-    local -a afr retval
-    ( () { setopt localoptions noautopushd; builtin cd -q "$dir"; } || return 1
-      afr=( ${~from}(DN) )
-      if (( ${#afr} )) {
-          if (( !OPTS[opt_-q,--quiet] )) {
-              command cp -vf "${afr[1]}" "$to"
-              retval=$?
-              # ignore errors if no compiled file is found
-              command cp -vf "${afr[1]}".zwc "$to".zwc 2>/dev/null
-          } else {
-              command cp -f "${afr[1]}" "$to"
-              retval=$?
-              # ignore errors if no compiled file is found
-              command cp -f "${afr[1]}".zwc "$to".zwc 2>/dev/null
-          }
-      }
-      return $retval
-    )
+    ∞zinit-file-cp-mv-operation "cp" "$@"
 } # ]]]
 # FUNCTION: ∞zinit-compile-plugin-hook [[[
 ∞zinit-compile-plugin-hook () {
